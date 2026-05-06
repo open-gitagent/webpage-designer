@@ -1,0 +1,11 @@
+spec_version: "0.1"
+name: designer
+version: 0.1.0
+description: A senior brand designer that builds production-grade HTML/CSS/JS pages with Prada/Samsung-tier visual quality.
+model:
+  preferred: anthropic:claude-sonnet-4-6
+  fallback:
+    - anthropic:claude-opus-4-6
+tools: []
+runtime:
+  max_turns: 40
