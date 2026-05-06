@@ -1,6 +1,8 @@
-# Designer
+# GitAgent Designer
 
-A git-native, multimodal frontend builder. Chat (or speak, or show a photo) to a senior brand designer; it writes the HTML/CSS/JS for a full page; you watch it render live in an iframe.
+A git-native, multimodal frontend builder for brand consultancies. Chat (or speak, or show a photo) to a senior brand designer; it writes the HTML/CSS/JS for a full page; you watch it render live in an iframe.
+
+> **You're looking for the React app at `http://localhost:5173`** — not the stock gitclaw voice UI at `http://localhost:3333`. This repo runs its own Fastify backend (port 8882) and Vite/React frontend (port 5173). If you've separately installed the `gitclaw` CLI globally and run `gitclaw --voice`, that launches gitclaw's own bundled UI on 3333 and is **not** this app. Stop that process and use `npm run dev` from this repo instead.
 
 Built on:
 - **[gitclaw SDK](https://github.com/open-gitagent/gitagent)** — agents-as-git-repos runtime
@@ -18,28 +20,50 @@ Built on:
 ## Setup
 
 ```bash
-cd /Users/zeus/designer
-cp .env.example .env       # then edit .env
+git clone https://github.com/open-gitagent/webpage-designer
+cd webpage-designer
+cp .env.example .env
 ```
 
-Set in `.env` (or your shell):
+Edit `.env` and fill in your keys:
 
 ```
+# REQUIRED — design agent
 ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...        # optional — only required for voice
-PORT=8787                    # optional
+
+# OPTIONAL — voice (OpenAI Realtime)
+OPENAI_API_KEY=sk-...
+
+# OPTIONAL — image search (Pexels free tier)
+PEXELS_API_KEY=...
+
+# OPTIONAL — image generation, background removal, studio relight (fal.ai)
+FAL_KEY=...
+
+# OPTIONAL — change the auth credentials. Defaults are lyzr / lyzr2b28.
+# Override these in production. The defaults are public in this repo's source.
+AUTH_USER=lyzr
+AUTH_PASS=lyzr2b28
+
+PORT=8882
 ```
+
+Install and run:
 
 ```bash
 npm install
 npm run dev
 ```
 
-This starts both:
-- API + agent server on `http://localhost:8787`
-- Vite dev server on `http://localhost:5173`
+`npm run dev` starts BOTH services concurrently via the workspace setup:
+- **Fastify API + agent server** on `http://localhost:8882`
+- **Vite React dev server** on `http://localhost:5173` (with proxy to the API)
 
-Open **http://localhost:5173**, click `+ new`, name it, and start describing what you want to build.
+**Open `http://localhost:5173`** in your browser. You'll see the login screen. Sign in with `lyzr` / `lyzr2b28` (or whatever you set `AUTH_USER` / `AUTH_PASS` to in `.env`). Once authed, click `+ new project`, name it, and describe what you want to build.
+
+### Common confusion
+
+If you see a different UI at `http://localhost:3333`, that's **gitclaw's stock voice UI** from a separately-installed `gitclaw` CLI process — not this app. Kill that process (`pkill -f 'gitclaw --voice'`) and use `npm run dev` from this repo. The 3333 port is gitclaw's CLI default; this app uses 5173 (frontend) + 8882 (backend) and never 3333.
 
 ## How a turn works
 
