@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Sparkles } from "lucide-react";
 import { Chat } from "./components/Chat";
 import { Preview } from "./components/Preview";
 import { MediaPanel } from "./components/MediaPanel";
@@ -11,14 +12,26 @@ export default function App() {
   const [reloadKey, setReloadKey] = useState(0);
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
+  const [shimmerOn, setShimmerOn] = useState(true);
+  const [runFiles, setRunFiles] = useState<string[]>([]);
   const reloadTimer = useRef<number | null>(null);
 
-  const onFileChanged = (_relPath: string) => {
+  const onFileChanged = (relPath: string) => {
+    setRunFiles((prev) => (prev.includes(relPath) ? prev : [...prev, relPath]));
     if (reloadTimer.current) window.clearTimeout(reloadTimer.current);
     reloadTimer.current = window.setTimeout(() => setReloadKey((k) => k + 1), 250);
   };
 
   const session = useAgentSession({ projectId: active, onFileChanged });
+
+  // Reset the per-run file tracker each time a new run begins.
+  const prevRunningRef = useRef(false);
+  useEffect(() => {
+    if (session.running && !prevRunningRef.current) {
+      setRunFiles([]);
+    }
+    prevRunningRef.current = session.running;
+  }, [session.running]);
 
   const triggerBrandBook = () => {
     if (!active) return;
@@ -56,13 +69,15 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <span className="mark">d</span>
-          <span>designer</span>
-          <span className="descriptor">a brand-tier site forge</span>
+          <span className="mark" />
+          <span className="brand-stack">
+            <span className="brand-name">GitAgent</span>
+            <span className="brand-sub">brand designer</span>
+          </span>
+          <span className="descriptor">an uncommon growth tool</span>
         </div>
         <div className="tagline">
-          Volume <span className="vol">i</span> · MMXXVI <br />
-          built on gitclaw · powered by claude
+          <span className="vol">prophet</span> · brand-tier site forge
         </div>
         <select
           className="proj-select"
@@ -80,9 +95,16 @@ export default function App() {
         <button className="btn-new" onClick={() => setShowCreate(true)}>
           + new project
         </button>
+        <button
+          className={`btn-icon shimmer-toggle ${shimmerOn ? "active" : ""}`}
+          onClick={() => setShimmerOn((v) => !v)}
+          title={shimmerOn ? "shimmer overlay on (click to hide)" : "shimmer overlay hidden (click to show)"}
+        >
+          <Sparkles size={14} strokeWidth={1.75} />
+        </button>
         <span className={`status ${session.connected ? "connected" : ""}`}>
           <span className="pip" />
-          {session.connected ? "live" : "offline"}
+          {session.connected ? "" : "offline"}
         </span>
       </header>
 
@@ -102,6 +124,8 @@ export default function App() {
         running={session.running}
         currentTool={session.currentTool}
         onBrandBook={triggerBrandBook}
+        showShimmer={shimmerOn}
+        runFiles={runFiles}
       />
 
       <Chat session={session} disabled={!active} />

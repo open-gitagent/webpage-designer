@@ -25,9 +25,38 @@ export function useAgentSession({ projectId, onFileChanged }: Args) {
   const streamingAssistant = useRef<string | null>(null);
   const running = textRunning || voiceRunning !== null;
 
+  // Load persisted chat history when project changes. Items are keyed by
+  // projectId in localStorage so switching projects restores their history.
+  useEffect(() => {
+    if (!projectId) {
+      setItems([]);
+      return;
+    }
+    try {
+      const raw = localStorage.getItem(`designer-chat-${projectId}`);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          setItems(parsed);
+          return;
+        }
+      }
+    } catch {}
+    setItems([]);
+  }, [projectId]);
+
+  // Persist on every items change (debounced via React batching).
   useEffect(() => {
     if (!projectId) return;
-    setItems([]);
+    try {
+      // Cap at the last 200 items to bound localStorage size.
+      const trimmed = items.slice(-200);
+      localStorage.setItem(`designer-chat-${projectId}`, JSON.stringify(trimmed));
+    } catch {}
+  }, [projectId, items]);
+
+  useEffect(() => {
+    if (!projectId) return;
     let cancelled = false;
     let retryTimer: number | null = null;
 
@@ -73,6 +102,14 @@ export function useAgentSession({ projectId, onFileChanged }: Args) {
         setCurrentTool(null);
         setActivity("waking up");
         streamingAssistant.current = null;
+        return;
+      }
+      if ((evt as any).type === "run_queued") {
+        setActivity("queued behind the current task");
+        setItems((prev) => [
+          ...prev,
+          { id: id(), role: "system", text: "⏳ queued — waiting for the current build to finish" },
+        ]);
         return;
       }
       if (evt.type === "run_end") {

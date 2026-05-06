@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CurrentTool } from "../lib/agentWs";
 import { BuildingOverlay } from "./BuildingOverlay";
+import { AssetReel } from "./AssetReel";
 
 interface Props {
   projectId: string | null;
@@ -8,6 +9,8 @@ interface Props {
   running: boolean;
   currentTool: CurrentTool | null;
   onBrandBook: () => void;
+  showShimmer: boolean;
+  runFiles: string[];
 }
 
 const BLANK = "about:blank";
@@ -19,7 +22,22 @@ const VIEWPORTS: { id: Viewport; label: string; w: string }[] = [
   { id: "mobile", label: "390", w: "390" },
 ];
 
-export function Preview({ projectId, reloadKey, running, currentTool, onBrandBook }: Props) {
+export function Preview({
+  projectId,
+  reloadKey,
+  running,
+  currentTool,
+  onBrandBook,
+  showShimmer,
+  runFiles,
+}: Props) {
+  const indexTouchedThisRun = useMemo(
+    () => runFiles.some((f) => f === "index.html" || f.endsWith("/index.html")),
+    [runFiles],
+  );
+  // Show the asset-reel takeover only while the run is producing assets but
+  // index.html hasn't been written yet — i.e. the asset-creation phase.
+  const showAssetReel = !!projectId && running && !indexTouchedThisRun;
   // Two iframe buffers; the visible one is `front`, the offscreen one preloads next.
   const [src0, setSrc0] = useState(BLANK);
   const [src1, setSrc1] = useState(BLANK);
@@ -84,19 +102,9 @@ export function Preview({ projectId, reloadKey, running, currentTool, onBrandBoo
   return (
     <div className="panel-preview">
       <div className="preview-bar">
-        <span className="label">preview</span>
-        <span className="url">{projectId ? `/preview/${projectId}/site/${activeFile}` : "no project"}</span>
-        {projectId ? (
-          <a href={previewUrl} target="_blank" rel="noreferrer">
-            open in new tab ↗
-          </a>
-        ) : null}
-      </div>
-
-      {projectId && files.length > 0 ? (
-        <div className="page-tabs">
-          <div className="tabs-list">
-            {files.map((f) => {
+        <div className="tabs-list">
+          {projectId && files.length > 0 ? (
+            files.map((f) => {
               const stem = f.replace(/\.html$/, "");
               return (
                 <button
@@ -107,18 +115,22 @@ export function Preview({ projectId, reloadKey, running, currentTool, onBrandBoo
                   {stem || f}
                 </button>
               );
-            })}
-          </div>
+            })
+          ) : (
+            <span className="bar-placeholder">no project</span>
+          )}
+        </div>
+        <div className="bar-actions">
+          <button
+            className="vp-btn brand-book-btn"
+            onClick={onBrandBook}
+            disabled={!projectId}
+            title="Spawn a parallel agent to generate a 4-page brand book"
+          >
+            + brand book
+          </button>
+          <span className="vp-sep" />
           <div className="vp-toggle">
-            <button
-              className="vp-btn brand-book-btn"
-              onClick={onBrandBook}
-              disabled={!projectId}
-              title="Spawn a parallel agent to generate a 4-page brand book alongside your site"
-            >
-              + brand book
-            </button>
-            <span className="vp-sep" />
             {VIEWPORTS.map((v) => (
               <button
                 key={v.id}
@@ -130,8 +142,22 @@ export function Preview({ projectId, reloadKey, running, currentTool, onBrandBoo
               </button>
             ))}
           </div>
+          {projectId ? (
+            <>
+              <span className="vp-sep" />
+              <a
+                className="bar-link"
+                href={previewUrl}
+                target="_blank"
+                rel="noreferrer"
+                title={`open ${activeFile} in new tab`}
+              >
+                open ↗
+              </a>
+            </>
+          ) : null}
         </div>
-      ) : null}
+      </div>
 
       <div className="iframe-host" data-viewport={viewport}>
         <div className="viewport-frame">
@@ -147,7 +173,10 @@ export function Preview({ projectId, reloadKey, running, currentTool, onBrandBoo
             onLoad={onLoadFor(1)}
             className={front === 1 ? "front" : "back"}
           />
-          <BuildingOverlay running={running} />
+          <BuildingOverlay running={running && showShimmer && !showAssetReel} />
+          {showAssetReel && projectId ? (
+            <AssetReel projectId={projectId} files={runFiles} />
+          ) : null}
         </div>
         {running && currentTool ? (
           <div className="preview-chip">

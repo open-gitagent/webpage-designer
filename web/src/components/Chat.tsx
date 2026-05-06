@@ -39,9 +39,9 @@ export function Chat({ session, disabled }: Props) {
       <div className="messages" ref={scrollRef}>
         {session.items.length === 0 ? (
           <div className="welcome">
-            <div className="lead">Tell me what you want to build.</div>
-            Describe a brand, a vibe, a single page. I'll commit to a direction and ship a first cut. <br />
-            Try: <em>"a brutalist landing for a new espresso brand called Crude — raw concrete tones, monumental serif type, asymmetric grid."</em>
+            <div className="lead">Describe the brand. We'll build it.</div>
+            A category, a positioning, a vibe — give me one. I'll commit to a direction and ship a first cut. <br />
+            Try: <em>a confident landing page for a fintech challenger brand targeting Gen Z investors</em>.
           </div>
         ) : null}
         {session.items.map((m) => (

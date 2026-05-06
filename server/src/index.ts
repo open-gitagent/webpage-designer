@@ -13,7 +13,7 @@ import multipart from "@fastify/multipart";
 import fs from "node:fs/promises";
 import { PROJECTS_DIR, projectDir, assetsDir, safeJoin, siteDir } from "./paths.js";
 import { listProjects, createProject, readProjectMeta } from "./projects.js";
-import { runAgent } from "./agent.js";
+import { runAgentSerialized } from "./agent.js";
 import { registerVoice } from "./voice.js";
 import { registerVision } from "./vision.js";
 
@@ -110,6 +110,52 @@ app.post("/api/projects/:id/upload", async (req, reply) => {
   reply.send({ filename, path: `assets/${filename}`, bytes: buf.length });
 });
 
+app.post("/api/projects/:id/cutout", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  try {
+    await readProjectMeta(id);
+  } catch {
+    reply.code(404).send({ error: "not found" });
+    return;
+  }
+  const body = (req.body ?? {}) as { path?: string; output_filename?: string };
+  if (!body.path) {
+    reply.code(400).send({ error: "path required" });
+    return;
+  }
+  try {
+    const { removeBackgroundInternal } = await import("./fal-tools.js");
+    const out = body.output_filename ?? `cutout-${Date.now()}.png`;
+    const result = await removeBackgroundInternal(id, body.path, out);
+    reply.send(result);
+  } catch (err: any) {
+    reply.code(500).send({ error: err?.message ?? String(err) });
+  }
+});
+
+app.post("/api/projects/:id/studio", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  try {
+    await readProjectMeta(id);
+  } catch {
+    reply.code(404).send({ error: "not found" });
+    return;
+  }
+  const body = (req.body ?? {}) as { path?: string; output_filename?: string; prompt?: string };
+  if (!body.path) {
+    reply.code(400).send({ error: "path required" });
+    return;
+  }
+  try {
+    const { studioizeImageInternal } = await import("./fal-tools.js");
+    const out = body.output_filename ?? `studio-${Date.now()}.jpg`;
+    const result = await studioizeImageInternal(id, body.path, out, body.prompt);
+    reply.send(result);
+  } catch (err: any) {
+    reply.code(500).send({ error: err?.message ?? String(err) });
+  }
+});
+
 app.register(async (instance) => {
   instance.get("/ws/agent/:id", { websocket: true }, (socket, req) => {
     const { id } = req.params as { id: string };
@@ -141,18 +187,36 @@ app.register(async (instance) => {
         return;
       }
 
-      send({ type: "run_start" });
+      // We don't emit run_start here — it's emitted by the runner only when the
+      // actual agent begins (after any queue wait). This prevents two "designer
+      // running" indicators from flashing when a second prompt queues behind a
+      // first one in flight. The runner also emits run_queued if it has to wait.
+      let runStarted = false;
       try {
-        await runAgent({
-          projectId: id,
-          prompt: parsed.prompt,
-          abortSignal: abort.signal,
-          onMessage: (msg) => {
-            app.log.info({ kind: msg.type }, "[ws] msg out");
-            send({ type: "msg", msg });
+        await runAgentSerialized(
+          {
+            projectId: id,
+            prompt: parsed.prompt,
+            abortSignal: abort.signal,
+            onMessage: (msg) => {
+              if (!runStarted) {
+                runStarted = true;
+                send({ type: "run_start" });
+              }
+              app.log.info({ kind: msg.type }, "[ws] msg out");
+              send({ type: "msg", msg });
+            },
+            onFileChanged: (rel) => {
+              if (!runStarted) {
+                runStarted = true;
+                send({ type: "run_start" });
+              }
+              send({ type: "file_changed", path: rel });
+            },
           },
-          onFileChanged: (rel) => send({ type: "file_changed", path: rel }),
-        });
+          () => send({ type: "run_queued" }),
+        );
+        if (!runStarted) send({ type: "run_start" });
         send({ type: "run_end" });
       } catch (err: any) {
         app.log.error({ err: err?.message, stack: err?.stack }, "[ws] runAgent failed");

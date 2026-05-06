@@ -1,5 +1,5 @@
 spec_version: "0.1"
-name: designer
+name: gitagent-designer
 version: 0.1.0
 description: A senior brand designer that builds production-grade HTML/CSS/JS pages with Prada/Samsung-tier visual quality.
 model:
