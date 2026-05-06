@@ -16,6 +16,7 @@ import { listProjects, createProject, readProjectMeta } from "./projects.js";
 import { runAgentSerialized } from "./agent.js";
 import { registerVoice } from "./voice.js";
 import { registerVision } from "./vision.js";
+import { registerAuth } from "./auth.js";
 
 const PORT = Number(process.env.PORT ?? 8882);
 
@@ -25,9 +26,10 @@ if (!process.env.ANTHROPIC_API_KEY) {
 
 const app = Fastify({ logger: { level: "info" } });
 
-await app.register(cors, { origin: true });
+await app.register(cors, { origin: true, credentials: true });
 await app.register(websocket);
 await app.register(multipart, { limits: { fileSize: 25 * 1024 * 1024 } });
+await registerAuth(app);
 
 await fs.mkdir(PROJECTS_DIR, { recursive: true });
 await app.register(staticPlugin, {

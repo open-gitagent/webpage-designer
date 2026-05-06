@@ -3,10 +3,12 @@ import { Sparkles } from "lucide-react";
 import { Chat } from "./components/Chat";
 import { Preview } from "./components/Preview";
 import { MediaPanel } from "./components/MediaPanel";
+import { Login } from "./components/Login";
 import { useAgentSession } from "./lib/agentWs";
 import type { ProjectMeta } from "./lib/types";
 
 export default function App() {
+  const [authed, setAuthed] = useState<boolean | null>(null); // null = checking
   const [projects, setProjects] = useState<ProjectMeta[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -39,10 +41,17 @@ export default function App() {
   };
 
   useEffect(() => {
+    fetch("/api/auth/me", { credentials: "same-origin" }).then((r) => {
+      setAuthed(r.ok);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (authed !== true) return;
     refreshProjects().then((list) => {
       if (list.length > 0 && !active) setActive(list[0].id);
     });
-  }, []);
+  }, [authed]);
 
   async function refreshProjects() {
     const res = await fetch("/api/projects");
@@ -63,6 +72,13 @@ export default function App() {
     setNewName("");
     await refreshProjects();
     setActive(meta.id);
+  }
+
+  if (authed === null) {
+    return <div className="boot-screen" aria-hidden="true" />;
+  }
+  if (authed === false) {
+    return <Login onAuthed={() => setAuthed(true)} />;
   }
 
   return (
@@ -106,6 +122,16 @@ export default function App() {
           <span className="pip" />
           {session.connected ? "" : "offline"}
         </span>
+        <button
+          className="btn-logout"
+          onClick={async () => {
+            await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
+            setAuthed(false);
+          }}
+          title="sign out"
+        >
+          sign out
+        </button>
       </header>
 
       <MediaPanel
