@@ -11,7 +11,7 @@ import staticPlugin from "@fastify/static";
 import websocket from "@fastify/websocket";
 import multipart from "@fastify/multipart";
 import fs from "node:fs/promises";
-import { PROJECTS_DIR, projectDir, assetsDir, safeJoin } from "./paths.js";
+import { PROJECTS_DIR, projectDir, assetsDir, safeJoin, siteDir } from "./paths.js";
 import { listProjects, createProject, readProjectMeta } from "./projects.js";
 import { runAgent } from "./agent.js";
 import { registerVoice } from "./voice.js";
@@ -67,6 +67,27 @@ app.get("/api/projects/:id", async (req, reply) => {
     reply.send(meta);
   } catch {
     reply.code(404).send({ error: "not found" });
+  }
+});
+
+app.get("/api/projects/:id/site-files", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  try {
+    await readProjectMeta(id);
+  } catch {
+    reply.code(404).send({ error: "not found" });
+    return;
+  }
+  const dir = siteDir(id);
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    const files = entries
+      .filter((e) => e.isFile() && e.name.endsWith(".html"))
+      .map((e) => e.name)
+      .sort((a, b) => (a === "index.html" ? -1 : b === "index.html" ? 1 : a.localeCompare(b)));
+    reply.send({ files });
+  } catch {
+    reply.send({ files: [] });
   }
 });
 

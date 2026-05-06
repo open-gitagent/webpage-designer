@@ -20,6 +20,11 @@ export default function App() {
 
   const session = useAgentSession({ projectId: active, onFileChanged });
 
+  const triggerBrandBook = () => {
+    if (!active) return;
+    session.send(BRAND_BOOK_PROMPT);
+  };
+
   useEffect(() => {
     refreshProjects().then((list) => {
       if (list.length > 0 && !active) setActive(list[0].id);
@@ -81,15 +86,6 @@ export default function App() {
         </span>
       </header>
 
-      <Chat session={session} disabled={!active} />
-
-      <Preview
-        projectId={active}
-        reloadKey={reloadKey}
-        running={session.running}
-        currentTool={session.currentTool}
-      />
-
       <MediaPanel
         projectId={active}
         onSystemMessage={session.pushSystem}
@@ -99,6 +95,16 @@ export default function App() {
         onVoiceTaskEnd={session.endVoiceTask}
         onDesignerMessage={session.feedAgentMessage}
       />
+
+      <Preview
+        projectId={active}
+        reloadKey={reloadKey}
+        running={session.running}
+        currentTool={session.currentTool}
+        onBrandBook={triggerBrandBook}
+      />
+
+      <Chat session={session} disabled={!active} />
 
       {showCreate ? (
         <div className="modal-bg" onClick={() => setShowCreate(false)}>
@@ -125,3 +131,17 @@ export default function App() {
     </div>
   );
 }
+
+const BRAND_BOOK_PROMPT = `Spawn a brand book that complements the existing website. **DO NOT** modify \`index.html\`, \`styles.css\`, or \`script.js\` — those belong to the live website and another agent may be touching them right now. Read \`index.html\` first to understand the brand voice and palette.
+
+Then write FIVE new files in a single assistant turn as PARALLEL write_file calls:
+
+- \`manifesto.html\` — the brand's voice in one strong page. Tagline, positioning sentence, hero photograph if available, a short narrative block.
+- \`system.html\` — visual system. Color tokens (named, with hex), typography pairing (live specimen lines for display + body), motion principles, photography direction notes.
+- \`gallery.html\` — mood / inspiration. 3-6 photographs that anchor the aesthetic. Asymmetric layout; never a 3xN card grid. Each photo with photographer attribution.
+- \`application.html\` — the system applied in context: a sample homepage section, a product card, a callout. Same tokens, different page, proves the system works.
+- \`brand-book.css\` — shared styles for the four pages. Do not import \`styles.css\`; the brand book is its own visual world. Use the same palette and fonts as the website to stay coherent.
+
+Cross-link the four with a small persistent nav at the top of each: manifesto / system / gallery / application. Same nav on every page. Hairline-thin, lowercase, current page highlighted subtly.
+
+Fire ALL FIVE write_file calls in PARALLEL in the same assistant turn. The user is watching the iframe; serialized writes feel slow.`;
