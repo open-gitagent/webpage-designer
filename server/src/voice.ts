@@ -56,11 +56,14 @@ const reqId = customAlphabet("abcdefghijklmnopqrstuvwxyz0123456789", 10);
 
 const VOICE_INSTRUCTIONS = `You are the voice front-end of a senior brand designer named "GitAgent Designer". When the user asks who you are, identify as GitAgent Designer. Talk like a calm, terse creative producer — short sentences, never corporate.
 
-ABSOLUTE RULE — speak first, then call the tool.
+ABSOLUTE RULE — speak first, then call the tool. Keep speech short.
 When the user gives you a design instruction, you MUST in this order, in the same turn:
-  1. Say a brief spoken acknowledgement out loud first ("on it", "let me try a brutalist take", "adding the photo now").
+  1. Say ONE brief spoken acknowledgement — 3-6 words max ("on it", "got it, building now", "swapping the hero"). Do NOT pre-narrate what the designer is going to do — you don't know yet. Do NOT describe sections, palettes, type choices, or anything specific. Just acknowledge.
   2. THEN call the function send_to_designer ONCE with their instruction as a clean, written brief.
-Never call send_to_designer without first speaking. Never just talk without then calling the tool when an action is requested.
+
+Never call send_to_designer without first speaking. Never just talk without then calling the tool when an action is requested. Never call send_to_designer twice for one user message — bundle everything into one instruction.
+
+When the designer finishes and returns a result, speak a SHORT summary (one sentence, 8-15 words) based ONLY on what the result string says. Do not invent details that weren't in the result. Do not list every file. The user already sees the page in the preview — you're confirming completion, not describing the work.
 
 PREFIX YOUR INSTRUCTION with the right verb:
   - "Build: ..." for a new page or a topic pivot (different brand/subject than what's currently on the page). The designer will write_file all core files fresh.
@@ -75,6 +78,14 @@ The send_to_designer call BLOCKS until the design agent finishes. While you are 
 
 WHEN THE DESIGNER FINISHES.
 You'll receive a short result string. Summarize what changed in 1-2 spoken sentences. Never read code, file paths, HTML, or CSS out loud.
+
+VISUAL AWARENESS — you DO see when the user has the camera or screen toggle on.
+
+You are an audio model by default, but you have access to two vision tools:
+  - **look_at_camera** — lightweight glance. Use whenever the user asks awareness questions: "do you see me?", "what am I holding?", "what's behind me?", "how does this look?", "check this out". The function returns a 1–2 sentence description from a vision model. Speak the description naturally; do NOT read it verbatim if it's too long.
+  - **capture_from_camera** — heavyweight save + studio + cutout pipeline. Only for when the user wants the captured image USED on the page (see CAMERA CAPTURE section below).
+
+If the user asks "can you see me?" or similar, do NOT say no out of habit — call look_at_camera and answer based on what comes back. If the function returns an error like "no camera active", THEN say "I don't see a camera feed — turn the camera or screen toggle on."
 
 CAMERA CAPTURE — strict orchestration.
 
@@ -113,6 +124,23 @@ const SEND_TO_DESIGNER_FN = {
       },
     },
     required: ["instruction"],
+  },
+};
+
+const LOOK_AT_CAMERA_FN = {
+  type: "function",
+  name: "look_at_camera",
+  description:
+    "Glance at the user's current webcam/screen frame and get a short visual description. Lightweight — no save, no background removal, no studio relight. Use this when the user asks awareness questions: 'do you see me?', 'what am I holding?', 'what's behind me?', 'how do I look?', 'check this out'. Returns a 1-2 sentence description from a vision model. If you call this with no camera/screen on, you'll get an error — tell the user to turn one on.",
+  parameters: {
+    type: "object",
+    properties: {
+      reason: {
+        type: "string",
+        description: "One short sentence on why you're looking (surfaced to the UI).",
+      },
+    },
+    required: ["reason"],
   },
 };
 
@@ -203,7 +231,7 @@ export async function registerVoice(app: FastifyInstance) {
             output_audio_format: "pcm16",
             input_audio_transcription: { model: "whisper-1" },
             turn_detection: { type: "server_vad", threshold: 0.6, prefix_padding_ms: 400, silence_duration_ms: 800, create_response: true },
-            tools: [SEND_TO_DESIGNER_FN, CAPTURE_FROM_CAMERA_FN],
+            tools: [SEND_TO_DESIGNER_FN, LOOK_AT_CAMERA_FN, CAPTURE_FROM_CAMERA_FN],
             tool_choice: "auto",
             modalities: ["audio", "text"],
           },
@@ -294,6 +322,50 @@ export async function registerVoice(app: FastifyInstance) {
               type: "function_call_output",
               call_id: evt.call_id,
               output: summary,
+            },
+          });
+          sendUp({ type: "response.create" });
+          return;
+        }
+
+        if (evt.name === "look_at_camera") {
+          let args: { reason?: string } = {};
+          try {
+            args = JSON.parse(evt.arguments ?? "{}");
+          } catch {}
+          const reason = (args.reason ?? "").trim();
+
+          sendDown({ type: "voice_look_start", reason });
+          const frame = await requestFrame("glance", reason);
+          let output: string;
+          try {
+            if (frame.error || !frame.path) {
+              output = `ERROR: ${frame.error ?? "unknown"}`;
+              sendDown({ type: "voice_look_end", error: output });
+            } else {
+              const abs = safeJoin(siteDir(id), normalizeSitePath(frame.path));
+              const buf = await fs.readFile(abs);
+              const description = await describeImage(
+                buf.toString("base64"),
+                "image/jpeg",
+                "Describe what you see in 1-2 short sentences. Be specific about people, objects, lighting, mood. Do NOT include hex codes or design jargon — this is being spoken aloud to the user, who asked you what you see.",
+              );
+              output = description;
+              sendDown({ type: "voice_look_end", description });
+              // Glance frames are transient — clean up so they don't clutter assets/.
+              fs.unlink(abs).catch(() => {});
+            }
+          } catch (err: any) {
+            output = `ERROR: ${err?.message ?? String(err)}`;
+            sendDown({ type: "voice_look_end", error: output });
+          }
+
+          sendUp({
+            type: "conversation.item.create",
+            item: {
+              type: "function_call_output",
+              call_id: evt.call_id,
+              output,
             },
           });
           sendUp({ type: "response.create" });

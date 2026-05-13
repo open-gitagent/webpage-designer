@@ -8,4 +8,4 @@ model:
     - anthropic:claude-opus-4-6
 tools: []
 runtime:
-  max_turns: 40
+  max_turns: 12

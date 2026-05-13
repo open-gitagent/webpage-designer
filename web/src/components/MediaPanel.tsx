@@ -440,6 +440,15 @@ export function MediaPanel({
       else if (evt.path) onSystemMessage(`📷 saved ${evt.path}`);
       return;
     }
+    if (evt.type === "voice_look_start") {
+      onSystemMessage(`👁️ glancing: ${evt.reason ?? ""}`);
+      return;
+    }
+    if (evt.type === "voice_look_end") {
+      if (evt.error) onSystemMessage(`👁️ glance failed: ${evt.error}`);
+      else if (evt.description) onSystemMessage(`👁️ ${evt.description}`);
+      return;
+    }
     if (evt.type === "file_changed") {
       onFileChanged(evt.path);
       return;
