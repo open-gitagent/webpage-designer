@@ -85,7 +85,11 @@ You are an audio model by default, but you have access to two vision tools:
   - **look_at_camera** — lightweight glance. Use whenever the user asks awareness questions: "do you see me?", "what am I holding?", "what's behind me?", "how does this look?", "check this out". The function returns a 1–2 sentence description from a vision model. Speak the description naturally; do NOT read it verbatim if it's too long.
   - **capture_from_camera** — heavyweight save + studio + cutout pipeline. Only for when the user wants the captured image USED on the page (see CAMERA CAPTURE section below).
 
-If the user asks "can you see me?" or similar, do NOT say no out of habit — call look_at_camera and answer based on what comes back. If the function returns an error like "no camera active", THEN say "I don't see a camera feed — turn the camera or screen toggle on."
+If the user asks "can you see me?" or similar, do NOT say no out of habit — call look_at_camera and answer based on what comes back.
+
+When look_at_camera returns a description, **speak it essentially as-is** — the description is already written to be spoken (1-2 sentences, no jargon, opens with yes/no). Do NOT paraphrase it into something different. Do NOT say "I can't see you" if the description starts with "Yes, I can see you" — that would directly contradict the function result the user is also reading in chat.
+
+If the function returns an error like "no camera active", THEN say "I don't see a camera feed — turn the camera or screen toggle on."
 
 CAMERA CAPTURE — strict orchestration.
 
@@ -233,6 +237,12 @@ export async function registerVoice(app: FastifyInstance) {
             turn_detection: { type: "server_vad", threshold: 0.6, prefix_padding_ms: 400, silence_duration_ms: 800, create_response: true },
             tools: [SEND_TO_DESIGNER_FN, LOOK_AT_CAMERA_FN, CAPTURE_FROM_CAMERA_FN],
             tool_choice: "auto",
+            // Prevent the model from emitting capture_from_camera AND
+            // send_to_designer in one response. With parallel calls the
+            // designer would race against the capture pipeline and use
+            // a stale asset path. Sequential forces: capture first, see
+            // the result, THEN designer.
+            parallel_tool_calls: false,
             modalities: ["audio", "text"],
           },
         });
@@ -348,9 +358,21 @@ export async function registerVoice(app: FastifyInstance) {
               const description = await describeImage(
                 buf.toString("base64"),
                 "image/jpeg",
-                "Describe what you see in 1-2 short sentences. Be specific about people, objects, lighting, mood. Do NOT include hex codes or design jargon — this is being spoken aloud to the user, who asked you what you see.",
+                `The user just spoke to a voice agent and asked something like "can you see me?" / "what do you see?" / "what am I holding?". You are the voice agent's eyes. Answer in 1-2 short spoken sentences. Lead with a direct yes/no:
+
+- If a person is clearly in frame: "Yes, I can see you — [one short sentence describing them and the immediate scene]."
+- If no person but other content (a room, screen, product): "I can see [what's there], but you're not in the frame right now."
+- If the frame is empty/dark/blurry: "Frame's too dark/empty to make anything out — try better lighting."
+
+No hex codes. No design jargon. No mood-board language. This is being spoken aloud as the answer to the user's question.
+
+Reason the user gave: ${reason || "(unspecified)"}`,
               );
               output = description;
+              app.log.info(
+                { reason, description: description.slice(0, 200) },
+                "[voice] look_at_camera result",
+              );
               sendDown({ type: "voice_look_end", description });
               // Glance frames are transient — clean up so they don't clutter assets/.
               fs.unlink(abs).catch(() => {});

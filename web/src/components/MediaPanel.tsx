@@ -69,6 +69,26 @@ export function MediaPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // CRITICAL: when the user switches projects, fully tear down voice + camera.
+  // The voice WS is bound to /voice/:id on open; if we leave it running on the
+  // old project, every send_to_designer / capture writes to the wrong project
+  // while the chat panel shows the events on the new project's page — the
+  // iframe ends up empty because the actual files live elsewhere.
+  const prevProjectId = useRef<string | null>(projectId);
+  useEffect(() => {
+    if (prevProjectId.current !== null && prevProjectId.current !== projectId) {
+      if (voiceMode !== "off" || wsRef.current) {
+        fullStopVoice();
+        onSystemMessage("🎙️ voice stopped — project changed. Click mic to re-enable on this project.");
+      }
+      if (camSource !== "off") {
+        stopCam();
+      }
+    }
+    prevProjectId.current = projectId;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
+
   // ---------- camera / screen ----------
   async function startCamera() {
     if (!projectId) return;
