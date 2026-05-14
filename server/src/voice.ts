@@ -6,6 +6,42 @@ import path from "node:path";
 const CAPTURED_ASSET_RE =
   /assets\/[\w-]+-\d{10,}(-studio)?(-cutout)?\.(png|jpe?g|webp)/gi;
 
+// Cache the vision description from the most recent capture per project so
+// the design agent can be told what the captured object actually IS — not
+// just given a binary file path it can't decode. Keyed by projectId.
+const recentCaptures = new Map<
+  string,
+  { paths: string[]; description: string; ts: number }
+>();
+const CAPTURE_CONTEXT_TTL_MS = 10 * 60 * 1000; // 10 min
+
+function rememberCapture(
+  projectId: string,
+  paths: (string | null | undefined)[],
+  description: string,
+) {
+  recentCaptures.set(projectId, {
+    paths: paths.filter((p): p is string => !!p),
+    description,
+    ts: Date.now(),
+  });
+}
+
+function captureContextForInstruction(
+  projectId: string,
+  instruction: string,
+): string | null {
+  const cap = recentCaptures.get(projectId);
+  if (!cap) return null;
+  if (Date.now() - cap.ts > CAPTURE_CONTEXT_TTL_MS) {
+    recentCaptures.delete(projectId);
+    return null;
+  }
+  const refs = cap.paths.some((p) => instruction.includes(p));
+  if (!refs) return null;
+  return cap.description;
+}
+
 /**
  * Force-rewrite a designer instruction into single-element iteration mode when
  * (a) the page already exists with substantial content, and (b) the instruction
@@ -306,7 +342,7 @@ export async function registerVoice(app: FastifyInstance) {
         const rawInstruction = (args.instruction ?? "").trim();
         if (!rawInstruction) return;
 
-        const { instruction, rewritten } = await sanitizeDesignerInstruction(
+        let { instruction, rewritten } = await sanitizeDesignerInstruction(
           id,
           rawInstruction,
         );
@@ -318,6 +354,27 @@ export async function registerVoice(app: FastifyInstance) {
           sendDown({
             type: "system_note",
             note: "↩︎ rewrote voice instruction as a single-element iteration (page already exists)",
+          });
+        }
+
+        // If the instruction references a freshly-captured asset, prepend the
+        // vision description so the designer knows WHAT it's working with — a
+        // file path alone is opaque (binary). Without this, the designer
+        // produces generic "Object Study" abstractions because it can't tell
+        // a Vada Pav box from a coffee cup from a remote control.
+        const capCtx = captureContextForInstruction(id, instruction);
+        if (capCtx) {
+          instruction =
+            `[CAPTURED OBJECT CONTEXT — read first]\n` +
+            `The image referenced by the asset path in this instruction was just captured from the user's camera. Vision read of the raw frame:\n\n${capCtx}\n\n` +
+            `Use this context to:\n` +
+            `1. Understand WHAT the object/subject actually is (brand, category, mood, palette) — your page should be about THIS thing, not generic.\n` +
+            `2. Search for supporting images via search_photos with queries specific to this subject (e.g. if it's a Mumbai street food brand, search for "mumbai cafe interior", "indian street food close-up", "vada pav" — NOT generic "minimalist interior").\n` +
+            `3. Build a brand-tier page rooted in the actual subject, not an abstract design exercise.\n\n` +
+            `---\n\nUser instruction:\n\n${instruction}`;
+          sendDown({
+            type: "system_note",
+            note: "🧠 injected captured-object vision context into designer instruction",
           });
         }
 
@@ -477,6 +534,11 @@ Reason the user gave: ${reason || "(unspecified)"}`,
               .filter(Boolean)
               .join("\n");
             const preferred = cutoutRel ?? studioRel ?? rawAssetRel;
+
+            // Cache the vision description so the next send_to_designer call
+            // that references any of these asset paths gets the semantic
+            // context — what the object IS — not just a binary file path.
+            rememberCapture(id, [rawAssetRel, studioRel, cutoutRel], description);
             output = `Captured. Variants saved (in pipeline order):\n${variants}\n\nVision read:\n${description}\n\nNext step: in the SAME turn, call send_to_designer with an instruction that uses the cutout (\`${preferred}\`) for hero placement and mentions the studio version for full-bleed feature sections. The cutout already has studio-grade lighting baked in — layer it over a color block or photograph. Don't read the file paths out loud.`;
             sendDown({
               type: "voice_capture_end",
