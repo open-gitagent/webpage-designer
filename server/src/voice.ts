@@ -210,6 +210,24 @@ export async function registerVoice(app: FastifyInstance) {
 
       const pending = new Map<string, PendingFrame>();
 
+      // Serialize function-call processing per voice WS. OpenAI Realtime may
+      // emit multiple tool calls in one response (e.g. capture_from_camera +
+      // send_to_designer). Without this chain, both handlers would run
+      // concurrently — the designer would race against the still-running
+      // capture pipeline and use a stale asset path. With the chain, each
+      // handler waits for the prior one to fully complete (including its
+      // function_call_output being sent upstream) before starting.
+      let toolChain: Promise<void> = Promise.resolve();
+      const serializeTool = (work: () => Promise<void>): Promise<void> => {
+        const next = toolChain
+          .catch(() => undefined)
+          .then(() => work().catch((err) => {
+            app.log.error({ err: err?.message }, "[voice] tool handler failed");
+          }));
+        toolChain = next;
+        return next;
+      };
+
       function requestFrame(filename_hint: string, reason: string): Promise<{ path?: string; bytes?: number; error?: string }> {
         const request_id = reqId();
         return new Promise((resolve) => {
@@ -237,12 +255,6 @@ export async function registerVoice(app: FastifyInstance) {
             turn_detection: { type: "server_vad", threshold: 0.6, prefix_padding_ms: 400, silence_duration_ms: 800, create_response: true },
             tools: [SEND_TO_DESIGNER_FN, LOOK_AT_CAMERA_FN, CAPTURE_FROM_CAMERA_FN],
             tool_choice: "auto",
-            // Prevent the model from emitting capture_from_camera AND
-            // send_to_designer in one response. With parallel calls the
-            // designer would race against the capture pipeline and use
-            // a stale asset path. Sequential forces: capture first, see
-            // the result, THEN designer.
-            parallel_tool_calls: false,
             modalities: ["audio", "text"],
           },
         });
@@ -266,99 +278,114 @@ export async function registerVoice(app: FastifyInstance) {
 
         if (evt.type !== "response.function_call_arguments.done") return;
 
+        // All function-call handlers run inside serializeTool() so that
+        // concurrent tool calls from one response (capture + designer,
+        // glance + designer, etc.) execute strictly in arrival order.
         if (evt.name === "send_to_designer") {
-          let args: { instruction?: string } = {};
-          try {
-            args = JSON.parse(evt.arguments ?? "{}");
-          } catch {}
-          const rawInstruction = (args.instruction ?? "").trim();
-          if (!rawInstruction) return;
-
-          const { instruction, rewritten } = await sanitizeDesignerInstruction(
-            id,
-            rawInstruction,
-          );
-          if (rewritten) {
-            app.log.info(
-              { from: rawInstruction.slice(0, 200), to: instruction.slice(0, 200) },
-              "[voice] rewrote designer instruction → single-element iteration",
-            );
-            sendDown({
-              type: "system_note",
-              note: "↩︎ rewrote voice instruction as a single-element iteration (page already exists)",
-            });
-          }
-
-          let summary = "Done.";
-          let wasQueued = false;
-          let designerStarted = false;
-          const startOnce = () => {
-            if (!designerStarted) {
-              designerStarted = true;
-              sendDown({ type: "designer_start", instruction });
-            }
-          };
-          try {
-            await runAgentSerialized(
-              {
-                projectId: id,
-                prompt: instruction,
-                onMessage: (msg) => {
-                  startOnce();
-                  sendDown({ type: "designer_msg", msg });
-                },
-                onFileChanged: (relPath) => {
-                  startOnce();
-                  sendDown({ type: "file_changed", path: relPath });
-                },
-              },
-              () => {
-                wasQueued = true;
-                sendDown({ type: "designer_queued", instruction });
-              },
-            );
-            startOnce();
-            summary = wasQueued
-              ? "Queued behind the previous task — both are now finished."
-              : "Files updated. Take a look.";
-          } catch (err: any) {
-            summary = `Designer error: ${err?.message ?? String(err)}`;
-          }
-          sendDown({ type: "designer_end" });
-
-          sendUp({
-            type: "conversation.item.create",
-            item: {
-              type: "function_call_output",
-              call_id: evt.call_id,
-              output: summary,
-            },
-          });
-          sendUp({ type: "response.create" });
+          serializeTool(() => handleSendToDesigner(evt));
           return;
         }
-
         if (evt.name === "look_at_camera") {
-          let args: { reason?: string } = {};
-          try {
-            args = JSON.parse(evt.arguments ?? "{}");
-          } catch {}
-          const reason = (args.reason ?? "").trim();
+          serializeTool(() => handleLookAtCamera(evt));
+          return;
+        }
+        if (evt.name === "capture_from_camera") {
+          serializeTool(() => handleCaptureFromCamera(evt));
+          return;
+        }
+        return;
+      });
 
-          sendDown({ type: "voice_look_start", reason });
-          const frame = await requestFrame("glance", reason);
-          let output: string;
-          try {
-            if (frame.error || !frame.path) {
-              output = `ERROR: ${frame.error ?? "unknown"}`;
-              sendDown({ type: "voice_look_end", error: output });
-            } else {
-              const abs = safeJoin(siteDir(id), normalizeSitePath(frame.path));
-              const buf = await fs.readFile(abs);
-              const description = await describeImage(
-                buf.toString("base64"),
-                "image/jpeg",
-                `The user just spoke to a voice agent and asked something like "can you see me?" / "what do you see?" / "what am I holding?". You are the voice agent's eyes. Answer in 1-2 short spoken sentences. Lead with a direct yes/no:
+      // ---- Function-call handlers (extracted so serializeTool can call them) ----
+
+      async function handleSendToDesigner(evt: any): Promise<void> {
+        let args: { instruction?: string } = {};
+        try {
+          args = JSON.parse(evt.arguments ?? "{}");
+        } catch {}
+        const rawInstruction = (args.instruction ?? "").trim();
+        if (!rawInstruction) return;
+
+        const { instruction, rewritten } = await sanitizeDesignerInstruction(
+          id,
+          rawInstruction,
+        );
+        if (rewritten) {
+          app.log.info(
+            { from: rawInstruction.slice(0, 200), to: instruction.slice(0, 200) },
+            "[voice] rewrote designer instruction → single-element iteration",
+          );
+          sendDown({
+            type: "system_note",
+            note: "↩︎ rewrote voice instruction as a single-element iteration (page already exists)",
+          });
+        }
+
+        let summary = "Done.";
+        let wasQueued = false;
+        let designerStarted = false;
+        const startOnce = () => {
+          if (!designerStarted) {
+            designerStarted = true;
+            sendDown({ type: "designer_start", instruction });
+          }
+        };
+        try {
+          await runAgentSerialized(
+            {
+              projectId: id,
+              prompt: instruction,
+              onMessage: (msg) => {
+                startOnce();
+                sendDown({ type: "designer_msg", msg });
+              },
+              onFileChanged: (relPath) => {
+                startOnce();
+                sendDown({ type: "file_changed", path: relPath });
+              },
+            },
+            () => {
+              wasQueued = true;
+              sendDown({ type: "designer_queued", instruction });
+            },
+          );
+          startOnce();
+          summary = wasQueued
+            ? "Queued behind the previous task — both are now finished."
+            : "Files updated. Take a look.";
+        } catch (err: any) {
+          summary = `Designer error: ${err?.message ?? String(err)}`;
+        }
+        sendDown({ type: "designer_end" });
+
+        sendUp({
+          type: "conversation.item.create",
+          item: { type: "function_call_output", call_id: evt.call_id, output: summary },
+        });
+        sendUp({ type: "response.create" });
+      }
+
+      async function handleLookAtCamera(evt: any): Promise<void> {
+        let args: { reason?: string } = {};
+        try {
+          args = JSON.parse(evt.arguments ?? "{}");
+        } catch {}
+        const reason = (args.reason ?? "").trim();
+
+        sendDown({ type: "voice_look_start", reason });
+        const frame = await requestFrame("glance", reason);
+        let output: string;
+        try {
+          if (frame.error || !frame.path) {
+            output = `ERROR: ${frame.error ?? "unknown"}`;
+            sendDown({ type: "voice_look_end", error: output });
+          } else {
+            const abs = safeJoin(siteDir(id), normalizeSitePath(frame.path));
+            const buf = await fs.readFile(abs);
+            const description = await describeImage(
+              buf.toString("base64"),
+              "image/jpeg",
+              `The user just spoke to a voice agent and asked something like "can you see me?" / "what do you see?" / "what am I holding?". You are the voice agent's eyes. Answer in 1-2 short spoken sentences. Lead with a direct yes/no:
 
 - If a person is clearly in frame: "Yes, I can see you — [one short sentence describing them and the immediate scene]."
 - If no person but other content (a room, screen, product): "I can see [what's there], but you're not in the frame right now."
@@ -367,128 +394,108 @@ export async function registerVoice(app: FastifyInstance) {
 No hex codes. No design jargon. No mood-board language. This is being spoken aloud as the answer to the user's question.
 
 Reason the user gave: ${reason || "(unspecified)"}`,
-              );
-              output = description;
-              app.log.info(
-                { reason, description: description.slice(0, 200) },
-                "[voice] look_at_camera result",
-              );
-              sendDown({ type: "voice_look_end", description });
-              // Glance frames are transient — clean up so they don't clutter assets/.
-              fs.unlink(abs).catch(() => {});
-            }
-          } catch (err: any) {
-            output = `ERROR: ${err?.message ?? String(err)}`;
-            sendDown({ type: "voice_look_end", error: output });
+            );
+            output = description;
+            app.log.info(
+              { reason, description: description.slice(0, 200) },
+              "[voice] look_at_camera result",
+            );
+            sendDown({ type: "voice_look_end", description });
+            fs.unlink(abs).catch(() => {});
           }
-
-          sendUp({
-            type: "conversation.item.create",
-            item: {
-              type: "function_call_output",
-              call_id: evt.call_id,
-              output,
-            },
-          });
-          sendUp({ type: "response.create" });
-          return;
+        } catch (err: any) {
+          output = `ERROR: ${err?.message ?? String(err)}`;
+          sendDown({ type: "voice_look_end", error: output });
         }
 
-        if (evt.name === "capture_from_camera") {
-          let args: { filename_hint?: string; remove_background?: boolean; reason?: string } = {};
-          try {
-            args = JSON.parse(evt.arguments ?? "{}");
-          } catch {}
-          const hint = (args.filename_hint || "snap").replace(/[^a-z0-9-]+/gi, "-").slice(0, 40);
-          const reason = (args.reason || "").trim();
-          const wantCutout = !!args.remove_background;
+        sendUp({
+          type: "conversation.item.create",
+          item: { type: "function_call_output", call_id: evt.call_id, output },
+        });
+        sendUp({ type: "response.create" });
+      }
 
-          sendDown({ type: "voice_capture_start", filename_hint: hint, remove_background: wantCutout, reason });
+      async function handleCaptureFromCamera(evt: any): Promise<void> {
+        let args: { filename_hint?: string; remove_background?: boolean; reason?: string } = {};
+        try {
+          args = JSON.parse(evt.arguments ?? "{}");
+        } catch {}
+        const hint = (args.filename_hint || "snap").replace(/[^a-z0-9-]+/gi, "-").slice(0, 40);
+        const reason = (args.reason || "").trim();
+        const wantCutout = !!args.remove_background;
 
-          const frame = await requestFrame(hint, reason);
-          let output: string;
-          try {
-            if (frame.error || !frame.path) {
-              output = `ERROR: ${frame.error ?? "unknown"}`;
-              sendDown({ type: "voice_capture_end", error: output });
-            } else {
-              const rawAssetRel = frame.path; // e.g. "assets/snap-1234.jpg"
-              sendDown({ type: "file_changed", path: rawAssetRel });
+        sendDown({ type: "voice_capture_start", filename_hint: hint, remove_background: wantCutout, reason });
 
-              // Vision pass on the saved file
-              let description = "";
-              try {
-                const abs = safeJoin(siteDir(id), normalizeSitePath(rawAssetRel));
-                const buf = await fs.readFile(abs);
-                description = await describeImage(buf.toString("base64"), "image/jpeg");
-              } catch (err: any) {
-                description = `(vision unavailable: ${err?.message ?? "err"})`;
-              }
-
-              // Sequential pipeline: studio-ize FIRST (clean lighting, backdrop),
-              // then rembg the STUDIO version (so the cutout inherits studio
-              // lighting, not phone-cam noise). Fall back gracefully on failure.
-              let studioRel: string | null = null;
-              let cutoutRel: string | null = null;
-              const ts = Date.now();
-              if (wantCutout) {
-                try {
-                  const studio = await studioizeImageInternal(
-                    id,
-                    rawAssetRel,
-                    `${hint}-${ts}-studio.jpg`,
-                  );
-                  studioRel = studio.rel;
-                  sendDown({ type: "file_changed", path: studioRel });
-                } catch (err: any) {
-                  description += `\n(studio-ize failed: ${err?.message ?? err} — running rembg on raw instead)`;
-                }
-                try {
-                  const sourceForCutout = studioRel ?? rawAssetRel;
-                  const cutoutName = studioRel
-                    ? `${hint}-${ts}-studio-cutout.png`
-                    : `${hint}-${ts}-cutout.png`;
-                  const cutout = await removeBackgroundInternal(id, sourceForCutout, cutoutName);
-                  cutoutRel = cutout.rel;
-                  sendDown({ type: "file_changed", path: cutoutRel });
-                } catch (err: any) {
-                  description += `\n(background removal failed: ${err?.message ?? err})`;
-                }
-              }
-
-              const variants = [
-                `raw: ${rawAssetRel}`,
-                studioRel ? `studio: ${studioRel}` : null,
-                cutoutRel ? `cutout: ${cutoutRel}` : null,
-              ]
-                .filter(Boolean)
-                .join("\n");
-              const preferred = cutoutRel ?? studioRel ?? rawAssetRel;
-              output = `Captured. Variants saved (in pipeline order):\n${variants}\n\nVision read:\n${description}\n\nNext step: in the SAME turn, call send_to_designer with an instruction that uses the cutout (\`${preferred}\`) for hero placement and mentions the studio version for full-bleed feature sections. The cutout already has studio-grade lighting baked in — layer it over a color block or photograph. Don't read the file paths out loud.`;
-              sendDown({
-                type: "voice_capture_end",
-                path: preferred,
-                description,
-                variants: { raw: rawAssetRel, studio: studioRel, cutout: cutoutRel },
-              });
-            }
-          } catch (err: any) {
-            output = `ERROR: ${err?.message ?? String(err)}`;
+        const frame = await requestFrame(hint, reason);
+        let output: string;
+        try {
+          if (frame.error || !frame.path) {
+            output = `ERROR: ${frame.error ?? "unknown"}`;
             sendDown({ type: "voice_capture_end", error: output });
-          }
+          } else {
+            const rawAssetRel = frame.path;
+            sendDown({ type: "file_changed", path: rawAssetRel });
 
-          sendUp({
-            type: "conversation.item.create",
-            item: {
-              type: "function_call_output",
-              call_id: evt.call_id,
-              output,
-            },
-          });
-          sendUp({ type: "response.create" });
-          return;
+            let description = "";
+            try {
+              const abs = safeJoin(siteDir(id), normalizeSitePath(rawAssetRel));
+              const buf = await fs.readFile(abs);
+              description = await describeImage(buf.toString("base64"), "image/jpeg");
+            } catch (err: any) {
+              description = `(vision unavailable: ${err?.message ?? "err"})`;
+            }
+
+            let studioRel: string | null = null;
+            let cutoutRel: string | null = null;
+            const ts = Date.now();
+            if (wantCutout) {
+              try {
+                const studio = await studioizeImageInternal(id, rawAssetRel, `${hint}-${ts}-studio.jpg`);
+                studioRel = studio.rel;
+                sendDown({ type: "file_changed", path: studioRel });
+              } catch (err: any) {
+                description += `\n(studio-ize failed: ${err?.message ?? err} — running rembg on raw instead)`;
+              }
+              try {
+                const sourceForCutout = studioRel ?? rawAssetRel;
+                const cutoutName = studioRel
+                  ? `${hint}-${ts}-studio-cutout.png`
+                  : `${hint}-${ts}-cutout.png`;
+                const cutout = await removeBackgroundInternal(id, sourceForCutout, cutoutName);
+                cutoutRel = cutout.rel;
+                sendDown({ type: "file_changed", path: cutoutRel });
+              } catch (err: any) {
+                description += `\n(background removal failed: ${err?.message ?? err})`;
+              }
+            }
+
+            const variants = [
+              `raw: ${rawAssetRel}`,
+              studioRel ? `studio: ${studioRel}` : null,
+              cutoutRel ? `cutout: ${cutoutRel}` : null,
+            ]
+              .filter(Boolean)
+              .join("\n");
+            const preferred = cutoutRel ?? studioRel ?? rawAssetRel;
+            output = `Captured. Variants saved (in pipeline order):\n${variants}\n\nVision read:\n${description}\n\nNext step: in the SAME turn, call send_to_designer with an instruction that uses the cutout (\`${preferred}\`) for hero placement and mentions the studio version for full-bleed feature sections. The cutout already has studio-grade lighting baked in — layer it over a color block or photograph. Don't read the file paths out loud.`;
+            sendDown({
+              type: "voice_capture_end",
+              path: preferred,
+              description,
+              variants: { raw: rawAssetRel, studio: studioRel, cutout: cutoutRel },
+            });
+          }
+        } catch (err: any) {
+          output = `ERROR: ${err?.message ?? String(err)}`;
+          sendDown({ type: "voice_capture_end", error: output });
         }
-      });
+
+        sendUp({
+          type: "conversation.item.create",
+          item: { type: "function_call_output", call_id: evt.call_id, output },
+        });
+        sendUp({ type: "response.create" });
+      }
 
       upstream.on("close", () => sendDown({ type: "voice_closed" }));
       upstream.on("error", (err) => sendDown({ type: "error", message: err.message }));
